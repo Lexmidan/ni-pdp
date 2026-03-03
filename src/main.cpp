@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <ctime>
 #include <climits>
+#include <chrono>
 #include <filesystem>
 
 // Herni deska – 2D matice ohodnocenych policek.
@@ -44,6 +45,10 @@ struct Solver {
     std::vector<std::vector<int>> cellState;
     std::vector<Piece> placedPieces;            // aktualne umistene kusy
     int pieceCounter;
+
+    // Statistiky
+    long long dfsCallCount;
+    double elapsedSec;
 
     // Nejlepsi nalezene reseni
     int bestScore;
@@ -154,6 +159,7 @@ void initSolver(Solver& solver, const Board& board,
     solver.board = board;
     solver.allPlacements = placements;
     solver.pieceCounter = 0;
+    solver.dfsCallCount = 0;
     solver.bestScore = INT_MIN;
 
     solver.cellState.assign(board.rows, std::vector<int>(board.cols, 0));
@@ -179,11 +185,13 @@ void initSolver(Solver& solver, const Board& board,
 
 void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
     // Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
-    //   A) Zkusi na nej umistit kazde vhodne quatromino
-    //   B) Zkusi ho preskocit (nechat nepokryte)
+    // A) Zkusi na nej umistit kazde vhodne quatromino
+    // B) Zkusi ho preskocit (nechat nepokryte)
     //
     // Orezavani: pokud currentScore + soucet kladnych zbylych policek
     // nemuze prekonat nejlepsi reseni, vetev se oreze.
+
+    solver.dfsCallCount++;
 
     int cols = solver.board.cols;
     int totalCells = solver.board.rows * cols;
@@ -269,9 +277,14 @@ int solve(Solver& solver) {
     std::cout << "  Pocatecni horni odhad (soucet kladnych): "
               << remainingPosSum << "\n";
 
+    auto t0 = std::chrono::steady_clock::now();
     dfs(solver, 0, 0, remainingPosSum);
+    auto t1 = std::chrono::steady_clock::now();
+    solver.elapsedSec = std::chrono::duration<double>(t1 - t0).count();
 
     std::cout << "DFS dokonceno.\n";
+    std::cout << "  Cas reseni: " << solver.elapsedSec << " s\n";
+    std::cout << "  Pocet volani DFS: " << solver.dfsCallCount << "\n";
     std::cout << "  Nejlepsi skore: " << solver.bestScore << "\n";
     std::cout << "  Pocet umistenych quatromin: "
               << solver.bestPlacedPieces.size() << "\n";
@@ -285,7 +298,8 @@ int solve(Solver& solver) {
 // Pokryte bunky se zobrazi jako T1, L2, atd. Nepokryte jako cislo.
 void writeSolution(std::ostream& out, const Board& board,
                    const std::vector<std::vector<int>>& cellState,
-                   const std::vector<Piece>& placedPieces, int score) {
+                   const std::vector<Piece>& placedPieces, int score,
+                   double elapsedSec, long long dfsCallCount) {
 
     // Prirad label kazdemu kusu (T1, T2, L1, L2, ...)
     int tCount = 0, lCount = 0;
@@ -325,6 +339,8 @@ void writeSolution(std::ostream& out, const Board& board,
     out << "\nSkore (soucet nepokrytych): " << score << "\n";
     out << "Pocet umistenych quatromin: " << placedPieces.size()
         << " (T: " << tCount << ", L: " << lCount << ")\n";
+    out << "Cas reseni: " << elapsedSec << " s\n";
+    out << "Pocet volani DFS: " << dfsCallCount << "\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -365,7 +381,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Zlepseni pokrytim: " << (bestScore - totalSum) << "\n\n";
 
     writeSolution(std::cout, board, solver.bestCellState,
-                  solver.bestPlacedPieces, bestScore);
+                  solver.bestPlacedPieces, bestScore,
+                  solver.elapsedSec, solver.dfsCallCount);
 
     // Ulozeni do souboru
     std::filesystem::create_directories("mapsol");
@@ -382,7 +399,8 @@ int main(int argc, char* argv[]) {
     std::ofstream fout(outputPath);
     if (fout.is_open()) {
         writeSolution(fout, board, solver.bestCellState,
-                      solver.bestPlacedPieces, bestScore);
+                      solver.bestPlacedPieces, bestScore,
+                      solver.elapsedSec, solver.dfsCallCount);
         std::cout << "Reseni ulozeno do: " << outputPath << "\n";
     }
 
