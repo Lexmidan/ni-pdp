@@ -78,8 +78,9 @@ Board loadBoard(const std::string& filepath) {
     return board;
 }
 
+// Vypise desku na konzoli ve formatovanem tvaru.
 void printBoard(const Board& board) {
-    // Vypise desku na konzoli ve formatovanem tvaru.
+
     std::cout << "Deska " << board.rows << " x " << board.cols << ":\n";
     for (int r = 0; r < board.rows; r++) {
         for (int c = 0; c < board.cols; c++) {
@@ -89,8 +90,8 @@ void printBoard(const Board& board) {
     }
 }
 
+// Generuje vsechny tvary
 std::vector<Piece> getAllShapes() {
-    // Generuje vsechny tvary
     return {
         // T – 4 rotace
         {'T', {{0,1},{1,0},{1,1},{1,2}}},
@@ -114,10 +115,11 @@ std::vector<Piece> getAllShapes() {
 
 
 
+// Pro kazdy tvar a kazdou pozici na desce zkontrolujeme, zda se tam vejde.
+// Pokud ano, ulozime absolutni souradnice 4 pokrytych policek.
 std::vector<Piece> generateAllPlacements(const Board& board,
                                          const std::vector<Piece>& shapes) {
-    // Pro kazdy tvar a kazdou pozici na desce zkontrolujeme, zda se tam vejde.
-    // Pokud ano, ulozime absolutni souradnice 4 pokrytych policek.
+
     std::vector<Piece> placements;
 
     for (const auto& shape : shapes) {
@@ -134,28 +136,26 @@ std::vector<Piece> generateAllPlacements(const Board& board,
             for (int c = 0; c + maxC < board.cols; c++) {
                 Piece pl;
                 pl.type = shape.type;
+                int coveredSum = 0;
                 for (const auto& [sr, sc] : shape.cells) {
                     pl.cells.push_back({r + sr, c + sc});
+                    coveredSum += board.cells[r + sr][c + sc];
                 }
-                placements.push_back(pl);
+                // Pokrytim bunek se souctem >= 0 se skore nikdy nezlepsi
+                if (coveredSum < 0) {
+                    placements.push_back(pl);
+                }
             }
         }
     }
     return placements;
 }
 
-// ---------------------------------------------------------------------------
-// Inicializace resice
-// ---------------------------------------------------------------------------
-// Pripravi datove struktury a pro kazde policko predpocita,
-// ktera umisteni zacinaji na tomto policku.
-//
-// "Zacinaji" = policko je PRVNI bunkou umisteni v poradi skenovani
-// (zleva doprava, shora dolu). Diky tomu kazde umisteni zkousime prave
-// jednou – az kdyz DFS narazi na jeho prvni bunku.
 
+// Pripravi datove struktury a pro kazde policko predpocita, ktera umisteni zacinaji na tomto policku.
 void initSolver(Solver& solver, const Board& board,
-                const std::vector<Piece>& placements) {
+
+    const std::vector<Piece>& placements) {
     solver.board = board;
     solver.allPlacements = placements;
     solver.pieceCounter = 0;
@@ -165,6 +165,16 @@ void initSolver(Solver& solver, const Board& board,
     solver.cellState.assign(board.rows, std::vector<int>(board.cols, 0));
     solver.placementsForCell.assign(board.rows,
         std::vector<std::vector<int>>(board.cols));
+
+    //AI improvement: Predpocitame sumu pokrytych bunek pro kazde umisteni
+    std::vector<int> placementSum(placements.size());
+    for (int i = 0; i < (int)placements.size(); i++) {
+        int s = 0;
+        for (const auto& [cr, cc] : placements[i].cells) {
+            s += board.cells[cr][cc];
+        }
+        placementSum[i] = s;
+    }
 
     for (int i = 0; i < (int)placements.size(); i++) {
         // Najdeme bunku s nejmensi linearni pozici (= prvni v poradi skenovani)
@@ -180,16 +190,26 @@ void initSolver(Solver& solver, const Board& board,
         }
         solver.placementsForCell[minR][minC].push_back(i);
     }
+
+    //AI improvement: Seradime umisteni pro kazde policko podle sumy (nejzapornejsi prvni)
+    for (int r = 0; r < board.rows; r++) {
+        for (int c = 0; c < board.cols; c++) {
+            auto& vec = solver.placementsForCell[r][c];
+            std::sort(vec.begin(), vec.end(), [&](int a, int b) {
+                return placementSum[a] < placementSum[b];
+            });
+        }
+    }
 }
 
 
+// Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
+// A) Zkusi na nej umistit kazde vhodne quatromino
+// B) Zkusi ho preskocit (nechat nepokryte)
+//
+// Orezavani: pokud currentScore + soucet kladnych zbylych policek
+// nemuze prekonat nejlepsi reseni, vetev se oreze.
 void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
-    // Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
-    // A) Zkusi na nej umistit kazde vhodne quatromino
-    // B) Zkusi ho preskocit (nechat nepokryte)
-    //
-    // Orezavani: pokud currentScore + soucet kladnych zbylych policek
-    // nemuze prekonat nejlepsi reseni, vetev se oreze.
 
     solver.dfsCallCount++;
 
