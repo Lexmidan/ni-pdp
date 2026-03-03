@@ -1,9 +1,4 @@
 /*
- * Skladani quatromin s maximem
- *
- * Program resi ulohu umistovani quatromin tvaru T a L na obdelnikovou
- * herni desku tak, aby soucet ohodnoceni nepokrytych policek byl maximalni.
- *
  * Pouziti:
  *   sqx <vstupni_soubor>
  *
@@ -166,7 +161,7 @@ void initSolver(Solver& solver, const Board& board,
     solver.placementsForCell.assign(board.rows,
         std::vector<std::vector<int>>(board.cols));
 
-    //AI improvement: Predpocitame sumu pokrytych bunek pro kazde umisteni
+    //predpocitame sumu pokrytych bunek pro kazde umisteni
     std::vector<int> placementSum(placements.size());
     for (int i = 0; i < (int)placements.size(); i++) {
         int s = 0;
@@ -191,7 +186,7 @@ void initSolver(Solver& solver, const Board& board,
         solver.placementsForCell[minR][minC].push_back(i);
     }
 
-    //AI improvement: Seradime umisteni pro kazde policko podle sumy (nejzapornejsi prvni)
+    //Seradime umisteni pro kazde policko podle sumy (nejzapornejsi prvni)
     for (int r = 0; r < board.rows; r++) {
         for (int c = 0; c < board.cols; c++) {
             auto& vec = solver.placementsForCell[r][c];
@@ -313,9 +308,6 @@ int solve(Solver& solver) {
 }
 
 // Vystup reseni
-
-// Zapise maticovy popis pokryti do vystupniho proudu.
-// Pokryte bunky se zobrazi jako T1, L2, atd. Nepokryte jako cislo.
 void writeSolution(std::ostream& out, const Board& board,
                    const std::vector<std::vector<int>>& cellState,
                    const std::vector<Piece>& placedPieces, int score,
