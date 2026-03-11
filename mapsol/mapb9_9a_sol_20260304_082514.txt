@@ -1,0 +1,14 @@
+  10  10  10  L1  10  20  -1  10  -4
+  10  10  10  L1  25  10  10  10  -5
+  10  10  L1  L1  10  10  10  10  10
+  10  10  60   1  10  T1  10  10  -6
+  -1  L2  10  10  T1  T1  T1  L3  L3
+  10  L2  L2  L2  20  T2  10  10  L3
+  -5  10  10  10  T2  T2  T2  10  L3
+  10  10  L4  10  L5  10  10  10   8
+  L4  L4  L4   2  L5  L5  L5   6   9
+
+Skore (soucet nepokrytych): 509
+Pocet umistenych quatromin: 7 (T: 2, L: 5)
+Cas reseni: 0.0881349 s
+Pocet volani DFS: 286968

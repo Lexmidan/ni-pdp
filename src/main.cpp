@@ -341,7 +341,7 @@ void writeSolution(std::ostream& out, const Board& board,
             } else {
                 text = std::to_string(board.cells[r][c]);
             }
-            // Zarovnani doprava (jako Python rjust)
+            // Zarovnani doprava
             for (int p = 0; p < w - (int)text.size(); p++) out << ' ';
             out << text;
         }
