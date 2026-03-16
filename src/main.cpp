@@ -14,6 +14,7 @@
 #include <climits>
 #include <chrono>
 #include <filesystem>
+#include <omp.h>
 
 // Herni deska – 2D matice ohodnocenych policek.
 struct Board {
@@ -28,6 +29,13 @@ struct Piece {
     std::vector<std::pair<int,int>> cells; // 4 souradnice (radek, sloupec)
 };
 
+// Per-task mutable DFS state
+struct SearchState {
+    std::vector<std::vector<int>> cellState;
+    std::vector<Piece> placedPieces;
+    int pieceCounter = 0;
+};
+
 // stav solveru – deska, umisteni, nejlepsi reseni.
 struct Solver {
     Board board;
@@ -35,17 +43,11 @@ struct Solver {
 
     std::vector<std::vector<std::vector<int>>> placementsForCell;
 
-    // Aktualni stav behem DFS
-    //   0  = volne, -1 = preskocene, >0 = pokryte kusem s danym ID
-    std::vector<std::vector<int>> cellState;
-    std::vector<Piece> placedPieces;            // aktualne umistene kusy
-    int pieceCounter;
-
     // Statistiky
     long long dfsCallCount;
     double elapsedSec;
 
-    // Nejlepsi nalezene reseni
+    // Nejlepsi nalezene reseni (sdilene, chranene #pragma omp critical)
     int bestScore;
     std::vector<std::vector<int>> bestCellState;
     std::vector<Piece> bestPlacedPieces;
@@ -153,11 +155,9 @@ void initSolver(Solver& solver, const Board& board,
     const std::vector<Piece>& placements) {
     solver.board = board;
     solver.allPlacements = placements;
-    solver.pieceCounter = 0;
     solver.dfsCallCount = 0;
     solver.bestScore = INT_MIN;
 
-    solver.cellState.assign(board.rows, std::vector<int>(board.cols, 0));
     solver.placementsForCell.assign(board.rows,
         std::vector<std::vector<int>>(board.cols));
 
@@ -198,14 +198,22 @@ void initSolver(Solver& solver, const Board& board,
 }
 
 
+// Hloubka, do ktere se generuji OpenMP tasky
+static const int TASK_CUTOFF = 4;
+
 // Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
 // A) Zkusi na nej umistit kazde vhodne quatromino
 // B) Zkusi ho preskocit (nechat nepokryte)
 //
+// Na melkych urovnich (depth < TASK_CUTOFF) vytvari OpenMP tasky
+// s vlastni kopii stavu; hloubeji pokracuje ciste sekvencne.
+//
 // Orezavani: pokud currentScore + soucet kladnych zbylych policek
 // nemuze prekonat nejlepsi reseni, vetev se oreze.
-void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
+void dfs(Solver& solver, SearchState& state, int startPos,
+         int currentScore, int remainingPosSum, int depth) {
 
+    #pragma omp atomic
     solver.dfsCallCount++;
 
     int cols = solver.board.cols;
@@ -215,16 +223,19 @@ void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
     while (startPos < totalCells) {
         int r = startPos / cols;
         int c = startPos % cols;
-        if (solver.cellState[r][c] == 0) break;
+        if (state.cellState[r][c] == 0) break;
         startPos++;
     }
 
     // Vsechna policka rozhodnuta => koncovy stav
     if (startPos >= totalCells) {
-        if (currentScore > solver.bestScore) {
-            solver.bestScore = currentScore;
-            solver.bestCellState = solver.cellState;
-            solver.bestPlacedPieces = solver.placedPieces;
+        #pragma omp critical
+        {
+            if (currentScore > solver.bestScore) {
+                solver.bestScore = currentScore;
+                solver.bestCellState = state.cellState;
+                solver.bestPlacedPieces = state.placedPieces;
+            }
         }
         return;
     }
@@ -237,6 +248,8 @@ void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
         return;
     }
 
+    bool spawn = (depth < TASK_CUTOFF);
+
     //A: Umistit quatromino pokryvajici policko (r,c)
     for (int plIdx : solver.placementsForCell[r][c]) {
         const Piece& pl = solver.allPlacements[plIdx];
@@ -244,40 +257,48 @@ void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
         // Zkontroluj, zda jsou vsechny 4 bunky volne
         bool canPlace = true;
         for (const auto& [cr, cc] : pl.cells) {
-            if (solver.cellState[cr][cc] != 0) { canPlace = false; break; }
+            if (state.cellState[cr][cc] != 0) { canPlace = false; break; }
         }
         if (!canPlace) continue;
 
         // Umisti kus (oznac 4 bunky jeho ID)
-        solver.pieceCounter++;
+        state.pieceCounter++;
         int coveredPosSum = 0;
         for (const auto& [cr, cc] : pl.cells) {
-            solver.cellState[cr][cc] = solver.pieceCounter;
+            state.cellState[cr][cc] = state.pieceCounter;
             if (solver.board.cells[cr][cc] > 0) {
                 coveredPosSum += solver.board.cells[cr][cc];
             }
         }
-        solver.placedPieces.push_back(pl);
+        state.placedPieces.push_back(pl);
 
-        // Rekurze (pokryte bunky nepridavaji ke skore)
-        dfs(solver, startPos + 1, currentScore, remainingPosSum - coveredPosSum);
+        if (spawn) {
+            SearchState copy = state;
+            #pragma omp task shared(solver) firstprivate(copy)
+            dfs(solver, copy, startPos + 1, currentScore,
+                remainingPosSum - coveredPosSum, depth + 1);
+        } else {
+            dfs(solver, state, startPos + 1, currentScore,
+                remainingPosSum - coveredPosSum, depth + 1);
+        }
 
         //undo
-        solver.placedPieces.pop_back();
+        state.placedPieces.pop_back();
         for (const auto& [cr, cc] : pl.cells) {
-            solver.cellState[cr][cc] = 0;
+            state.cellState[cr][cc] = 0;
         }
-        solver.pieceCounter--;
+        state.pieceCounter--;
     }
 
-    //B: Preskocit policko (nechat nepokryte)
-    solver.cellState[r][c] = -1;
+    //B: Preskocit policko (nechat nepokryte) – posledni vetev, vzdy inline
+    state.cellState[r][c] = -1;
     int val = solver.board.cells[r][c];
     int posDelta = (val > 0) ? val : 0;
 
-    dfs(solver, startPos + 1, currentScore + val, remainingPosSum - posDelta);
+    dfs(solver, state, startPos + 1, currentScore + val,
+        remainingPosSum - posDelta, depth + 1);
 
-    solver.cellState[r][c] = 0;   // backtracking
+    state.cellState[r][c] = 0;   // backtracking
 }
 
 int solve(Solver& solver) {
@@ -288,12 +309,25 @@ int solve(Solver& solver) {
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
 
+    SearchState initState;
+    initState.cellState.assign(solver.board.rows,
+                               std::vector<int>(solver.board.cols, 0));
+
     std::cout << "Spousteni DFS resice...\n";
     std::cout << "  Pocatecni horni odhad (soucet kladnych): "
               << remainingPosSum << "\n";
+    std::cout << "  Pocet vlaken: " << omp_get_max_threads() << "\n";
 
     auto t0 = std::chrono::steady_clock::now();
-    dfs(solver, 0, 0, remainingPosSum);
+
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            dfs(solver, initState, 0, 0, remainingPosSum, 0);
+        }
+    }
+
     auto t1 = std::chrono::steady_clock::now();
     solver.elapsedSec = std::chrono::duration<double>(t1 - t0).count();
 
@@ -353,6 +387,7 @@ void writeSolution(std::ostream& out, const Board& board,
         << " (T: " << tCount << ", L: " << lCount << ")\n";
     out << "Cas reseni: " << elapsedSec << " s\n";
     out << "Pocet volani DFS: " << dfsCallCount << "\n";
+    out << "Pocet vlaken: " << omp_get_max_threads() << "\n";
 }
 
 int main(int argc, char* argv[]) {
