@@ -43,6 +43,9 @@ struct Solver {
 
     std::vector<std::vector<std::vector<int>>> placementsForCell;
 
+    // Hloubka, do ktere se generuji OpenMP tasky (vypocte se v solve())
+    int taskDepth;
+
     // Statistiky
     long long dfsCallCount;
     double elapsedSec;
@@ -198,9 +201,6 @@ void initSolver(Solver& solver, const Board& board,
 }
 
 
-// Hloubka, do ktere se generuji OpenMP tasky
-static const int TASK_CUTOFF = 4;
-
 // Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
 // A) Zkusi na nej umistit kazde vhodne quatromino
 // B) Zkusi ho preskocit (nechat nepokryte)
@@ -248,7 +248,7 @@ void dfs(Solver& solver, SearchState& state, int startPos,
         return;
     }
 
-    bool spawn = (depth < TASK_CUTOFF);
+    bool spawn = (depth < solver.taskDepth);
 
     //A: Umistit quatromino pokryvajici policko (r,c)
     for (int plIdx : solver.placementsForCell[r][c]) {
@@ -308,6 +308,10 @@ int solve(Solver& solver) {
         for (int c = 0; c < solver.board.cols; c++)
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
+
+    // Adaptivni hloubka tasku: skala s velikosti desky, omezena shora
+    int totalCells = solver.board.rows * solver.board.cols;
+    solver.taskDepth = std::clamp(totalCells / 8, 4, 16);
 
     SearchState initState;
     initState.cellState.assign(solver.board.rows,
