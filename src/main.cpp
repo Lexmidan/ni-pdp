@@ -311,7 +311,7 @@ int solve(Solver& solver) {
 
     // Adaptivni hloubka tasku: skala s velikosti desky, omezena shora
     int totalCells = solver.board.rows * solver.board.cols;
-    solver.taskDepth = std::clamp(totalCells / 8, 4, 16);
+    solver.taskDepth = std::clamp(totalCells / 16, 4, 16);
 
     SearchState initState;
     initState.cellState.assign(solver.board.rows,
@@ -397,6 +397,11 @@ void writeSolution(std::ostream& out, const Board& board,
 int main(int argc, char* argv[]) {
     std::string inputName = argv[1];
     std::string inputPath = "mapb/" + inputName;
+
+    if (argc >= 3) {
+        int nThreads = std::stoi(argv[2]);
+        omp_set_num_threads(nThreads);
+    }
 
     //Nacteni desky
     Board board;
