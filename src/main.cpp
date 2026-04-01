@@ -36,15 +36,19 @@ struct SearchState {
     int pieceCounter = 0;
 };
 
+struct WorkItem {
+    SearchState state;
+    int startPos;
+    int currentScore;
+    int remainingPosSum;
+};
+
 // stav solveru – deska, umisteni, nejlepsi reseni.
 struct Solver {
     Board board;
     std::vector<Piece> allPlacements; // vsechna mozna umisteni
 
     std::vector<std::vector<std::vector<int>>> placementsForCell;
-
-    // Hloubka, do ktere se generuji OpenMP tasky (vypocte se v solve())
-    int taskDepth;
 
     // Statistiky
     long long dfsCallCount;
@@ -201,20 +205,11 @@ void initSolver(Solver& solver, const Board& board,
 }
 
 
-// Prochazi policka zleva doprava, shora dolu. Pro kazde volne policko:
-// A) Zkusi na nej umistit kazde vhodne quatromino
-// B) Zkusi ho preskocit (nechat nepokryte)
-//
-// Na melkych urovnich (depth < TASK_CUTOFF) vytvari OpenMP tasky
-// s vlastni kopii stavu; hloubeji pokracuje ciste sekvencne.
-//
-// Orezavani: pokud currentScore + soucet kladnych zbylych policek
-// nemuze prekonat nejlepsi reseni, vetev se oreze.
+// DFS prohledavani. Pokud je workQueue != nullptr a depth < maxExpandDepth, 
+// misto rekurze sbira stavy do fronty pro datovy paralelismus.
 void dfs(Solver& solver, SearchState& state, int startPos,
-         int currentScore, int remainingPosSum, int depth) {
-
-    #pragma omp atomic
-    solver.dfsCallCount++;
+         int currentScore, int remainingPosSum, int depth,
+         std::vector<WorkItem>* workQueue = nullptr, int maxExpandDepth = 0) {
 
     int cols = solver.board.cols;
     int totalCells = solver.board.rows * cols;
@@ -225,6 +220,17 @@ void dfs(Solver& solver, SearchState& state, int startPos,
         int c = startPos % cols;
         if (state.cellState[r][c] == 0) break;
         startPos++;
+    }
+
+    // Generovani work items: dosazena cilova hloubka nebo konec desky
+    if (workQueue && (startPos >= totalCells || depth >= maxExpandDepth)) {
+        workQueue->push_back({state, startPos, currentScore, remainingPosSum});
+        return;
+    }
+
+    if (!workQueue) {
+        #pragma omp atomic
+        solver.dfsCallCount++;
     }
 
     // Vsechna policka rozhodnuta => koncovy stav
@@ -248,8 +254,6 @@ void dfs(Solver& solver, SearchState& state, int startPos,
         return;
     }
 
-    bool spawn = (depth < solver.taskDepth);
-
     //A: Umistit quatromino pokryvajici policko (r,c)
     for (int plIdx : solver.placementsForCell[r][c]) {
         const Piece& pl = solver.allPlacements[plIdx];
@@ -272,15 +276,9 @@ void dfs(Solver& solver, SearchState& state, int startPos,
         }
         state.placedPieces.push_back(pl);
 
-        if (spawn) {
-            SearchState copy = state;
-            #pragma omp task shared(solver) firstprivate(copy)
-            dfs(solver, copy, startPos + 1, currentScore,
-                remainingPosSum - coveredPosSum, depth + 1);
-        } else {
-            dfs(solver, state, startPos + 1, currentScore,
-                remainingPosSum - coveredPosSum, depth + 1);
-        }
+        dfs(solver, state, startPos + 1, currentScore,
+            remainingPosSum - coveredPosSum, depth + 1,
+            workQueue, maxExpandDepth);
 
         //undo
         state.placedPieces.pop_back();
@@ -296,7 +294,8 @@ void dfs(Solver& solver, SearchState& state, int startPos,
     int posDelta = (val > 0) ? val : 0;
 
     dfs(solver, state, startPos + 1, currentScore + val,
-        remainingPosSum - posDelta, depth + 1);
+        remainingPosSum - posDelta, depth + 1,
+        workQueue, maxExpandDepth);
 
     state.cellState[r][c] = 0;   // backtracking
 }
@@ -309,27 +308,33 @@ int solve(Solver& solver) {
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
 
-    // Adaptivni hloubka tasku: skala s velikosti desky, omezena shora
+    // Adaptivni hloubka rozbaleni: skala s velikosti desky
     int totalCells = solver.board.rows * solver.board.cols;
-    solver.taskDepth = std::clamp(totalCells / 16, 4, 16);
+    int expandDepth = std::clamp(totalCells / 8, 2, 32);
 
     SearchState initState;
     initState.cellState.assign(solver.board.rows,
                                std::vector<int>(solver.board.cols, 0));
 
+    // Predgeneravni pocatecnich stavu (rozbal strom do urcite hloubky)
+    std::vector<WorkItem> workQueue;
+    dfs(solver, initState, 0, 0, remainingPosSum, 0,
+        &workQueue, expandDepth);
+
     std::cout << "Spousteni DFS resice...\n";
     std::cout << "  Pocatecni horni odhad (soucet kladnych): "
               << remainingPosSum << "\n";
     std::cout << "  Pocet vlaken: " << omp_get_max_threads() << "\n";
+    std::cout << "  Vygenerovano pocatecnich stavu: "
+              << workQueue.size() << "\n";
 
     auto t0 = std::chrono::steady_clock::now();
 
-    #pragma omp parallel
-    {
-        #pragma omp single
-        {
-            dfs(solver, initState, 0, 0, remainingPosSum, 0);
-        }
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < (int)workQueue.size(); i++) {
+        SearchState localState = workQueue[i].state;
+        dfs(solver, localState, workQueue[i].startPos,
+            workQueue[i].currentScore, workQueue[i].remainingPosSum, 0);
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -451,7 +456,7 @@ int main(int argc, char* argv[]) {
     size_t dot = baseName.rfind('.');
     if (dot != std::string::npos) baseName = baseName.substr(0, dot);
 
-    std::string outputPath = "mapsol/" + baseName + "_sol_" + timeStr + ".txt";
+    std::string outputPath = "mapsol/" + baseName + "_sol_data_par_" + timeStr + ".txt";
     std::ofstream fout(outputPath);
     if (fout.is_open()) {
         writeSolution(fout, board, solver.bestCellState,
