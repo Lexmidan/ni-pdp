@@ -479,76 +479,37 @@ int solveMaster(Solver& solver, int numProcs) {
         activeSlaves++;
     }
 
-    // Prijimani vysledku, lokalni prace mastera a rozesılani dalsi prace
-    while (activeSlaves > 0 || nextWork < (int)workQueue.size()) {
-        // Zkontroluj, zda prisel vysledek od slave
-        int flag = 0;
+    // Prijimani vysledku a rozesılani dalsi prace
+    while (activeSlaves > 0) {
         MPI_Status status;
-        if (activeSlaves > 0) {
-            MPI_Iprobe(MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &flag, &status);
+        int resSz;
+        MPI_Recv(&resSz, 1, MPI_INT, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
+        int slave = status.MPI_SOURCE;
+
+        std::vector<char> resBuf(resSz);
+        MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
+
+        int slaveScore;
+        std::vector<std::vector<int>> slaveCellState;
+        std::vector<Piece> slavePieces;
+        long long slaveDfs;
+        deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
+        totalDfs += slaveDfs;
+
+        if (slaveScore > solver.bestScore) {
+            solver.bestScore = slaveScore;
+            solver.bestCellState = slaveCellState;
+            solver.bestPlacedPieces = slavePieces;
         }
 
-        if (flag) {
-            // Prijmi vysledek
-            int resSz;
-            MPI_Recv(&resSz, 1, MPI_INT, status.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
-            int slave = status.MPI_SOURCE;
-
-            std::vector<char> resBuf(resSz);
-            MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
-
-            int slaveScore;
-            std::vector<std::vector<int>> slaveCellState;
-            std::vector<Piece> slavePieces;
-            long long slaveDfs;
-            deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
-            totalDfs += slaveDfs;
-
-            if (slaveScore > solver.bestScore) {
-                solver.bestScore = slaveScore;
-                solver.bestCellState = slaveCellState;
-                solver.bestPlacedPieces = slavePieces;
-            }
-
-            // Poslat dalsi praci nebo ukoncit slave
-            if (nextWork < (int)workQueue.size()) {
-                auto buf = serializeWorkItem(workQueue[nextWork], rows, cols, solver.bestScore);
-                int sz = (int)buf.size();
-                MPI_Send(&sz, 1, MPI_INT, slave, TAG_WORK, MPI_COMM_WORLD);
-                MPI_Send(buf.data(), sz, MPI_BYTE, slave, TAG_WORK, MPI_COMM_WORLD);
-                nextWork++;
-            } else {
-                int dummy = 0;
-                MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
-                activeSlaves--;
-            }
-        } else if (nextWork < (int)workQueue.size()) {
-            // Zadny vysledek neceka — master si vezme praci sam
-            solveLocal(solver, workQueue[nextWork]);
-            totalDfs += solver.dfsCallCount;
+        // Poslat dalsi praci nebo ukoncit
+        if (nextWork < (int)workQueue.size()) {
+            auto buf = serializeWorkItem(workQueue[nextWork], rows, cols, solver.bestScore);
+            int sz = (int)buf.size();
+            MPI_Send(&sz, 1, MPI_INT, slave, TAG_WORK, MPI_COMM_WORLD);
+            MPI_Send(buf.data(), sz, MPI_BYTE, slave, TAG_WORK, MPI_COMM_WORLD);
             nextWork++;
         } else {
-            // Vsechna prace rozdana, cekame na posledni slave — blokujici recv
-            int resSz;
-            MPI_Recv(&resSz, 1, MPI_INT, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
-            int slave = status.MPI_SOURCE;
-
-            std::vector<char> resBuf(resSz);
-            MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
-
-            int slaveScore;
-            std::vector<std::vector<int>> slaveCellState;
-            std::vector<Piece> slavePieces;
-            long long slaveDfs;
-            deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
-            totalDfs += slaveDfs;
-
-            if (slaveScore > solver.bestScore) {
-                solver.bestScore = slaveScore;
-                solver.bestCellState = slaveCellState;
-                solver.bestPlacedPieces = slavePieces;
-            }
-
             int dummy = 0;
             MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
             activeSlaves--;

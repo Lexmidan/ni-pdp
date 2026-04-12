@@ -26,10 +26,15 @@ Například maticový popis řešení pro desku 4x4 může vypadat takto:
 
 
 # Kód
-`src/main.cpp` obsahuje implementaci řešení úlohy SQX: skládání quatromin s maximem.
+- `src/main.cpp` obsahuje implementaci sekvenčního řešení úlohy
+- `src/main_task_paral.cpp` obsahuje implementaci paralelního řešení pomocí task paralelismu
+- `src/main_data_paral.cpp` obsahuje implementaci paralelního řešení pomocí datového paralelismu.
+- `src/main_mpi.cpp` obsahuje implementaci paralelního řešení pomocí MPI ˇ+ datového paralelismu.
+
+
 
 Pouziti:
 ```
-  sqx <vstupni_soubor>
+  sqx_{<typ_reseni>} <vstupni_soubor> [pocet_omp_vlaken pro paralelni reseni]
 ```
 Vstupni soubor se hleda ve slozce `mapb/`, vystup se uklada do `mapsol/`.
