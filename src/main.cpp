@@ -1,6 +1,7 @@
 /*
+ * MPI + OpenMP reseni (Master-Slave)
  * Pouziti:
- *   sqx <vstupni_soubor>
+ *   mpirun -np <N> sqx <vstupni_soubor> [pocet_omp_vlaken]
  *
  * Vstupni soubor se hleda ve slozce mapb/, vystup se uklada do mapsol/.
  */
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <omp.h>
+#include <mpi.h>
 
 // Herni deska – 2D matice ohodnocenych policek.
 struct Board {
@@ -42,6 +44,116 @@ struct WorkItem {
     int currentScore;
     int remainingPosSum;
 };
+
+// MPI tagy
+static const int TAG_WORK = 1;
+static const int TAG_RESULT = 2;
+static const int TAG_TERMINATE = 3;
+
+// ---- Serializace WorkItem do/z souvisleho bufferu ----
+std::vector<char> serializeWorkItem(const WorkItem& wi, int rows, int cols, int bestScore) {
+    // Format: bestScore | startPos | currentScore | remainingPosSum | pieceCounter
+    //       | cellState[rows*cols] | numPieces | pieces (type + 4x(r,c))
+    int numPieces = (int)wi.state.placedPieces.size();
+    int intCount = 5 + rows * cols + 1 + numPieces * 9; // 9 ints per piece: type + 4*(r,c)
+    std::vector<char> buf(intCount * sizeof(int));
+    int* p = reinterpret_cast<int*>(buf.data());
+
+    *p++ = bestScore;
+    *p++ = wi.startPos;
+    *p++ = wi.currentScore;
+    *p++ = wi.remainingPosSum;
+    *p++ = wi.state.pieceCounter;
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            *p++ = wi.state.cellState[r][c];
+    *p++ = numPieces;
+    for (const auto& piece : wi.state.placedPieces) {
+        *p++ = (int)piece.type;
+        for (const auto& [cr, cc] : piece.cells) {
+            *p++ = cr;
+            *p++ = cc;
+        }
+    }
+    return buf;
+}
+
+WorkItem deserializeWorkItem(const std::vector<char>& buf, int rows, int cols, int& bestScore) {
+    const int* p = reinterpret_cast<const int*>(buf.data());
+    WorkItem wi;
+
+    bestScore = *p++;
+    wi.startPos = *p++;
+    wi.currentScore = *p++;
+    wi.remainingPosSum = *p++;
+    wi.state.pieceCounter = *p++;
+    wi.state.cellState.assign(rows, std::vector<int>(cols));
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            wi.state.cellState[r][c] = *p++;
+    int numPieces = *p++;
+    wi.state.placedPieces.resize(numPieces);
+    for (int i = 0; i < numPieces; i++) {
+        wi.state.placedPieces[i].type = (char)*p++;
+        wi.state.placedPieces[i].cells.resize(4);
+        for (int j = 0; j < 4; j++) {
+            wi.state.placedPieces[i].cells[j].first = *p++;
+            wi.state.placedPieces[i].cells[j].second = *p++;
+        }
+    }
+    return wi;
+}
+
+// Serializace vysledku: bestScore | numPieces | cellState | pieces | dfsCallCount(as 2 ints)
+std::vector<char> serializeResult(int score, const std::vector<std::vector<int>>& cellState,
+                                   const std::vector<Piece>& pieces, long long dfsCount,
+                                   int rows, int cols) {
+    int numPieces = (int)pieces.size();
+    int intCount = 2 + rows * cols + numPieces * 9 + 2; // +2 for dfsCount as two ints
+    std::vector<char> buf(intCount * sizeof(int));
+    int* p = reinterpret_cast<int*>(buf.data());
+
+    *p++ = score;
+    *p++ = numPieces;
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            *p++ = cellState[r][c];
+    for (const auto& piece : pieces) {
+        *p++ = (int)piece.type;
+        for (const auto& [cr, cc] : piece.cells) {
+            *p++ = cr;
+            *p++ = cc;
+        }
+    }
+    // dfsCallCount as two 32-bit ints
+    *p++ = (int)(dfsCount & 0xFFFFFFFF);
+    *p++ = (int)((dfsCount >> 32) & 0xFFFFFFFF);
+    return buf;
+}
+
+void deserializeResult(const std::vector<char>& buf, int rows, int cols,
+                       int& score, std::vector<std::vector<int>>& cellState,
+                       std::vector<Piece>& pieces, long long& dfsCount) {
+    const int* p = reinterpret_cast<const int*>(buf.data());
+    score = *p++;
+    int numPieces = *p++;
+    cellState.assign(rows, std::vector<int>(cols));
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            cellState[r][c] = *p++;
+    pieces.resize(numPieces);
+    for (int i = 0; i < numPieces; i++) {
+        pieces[i].type = (char)*p++;
+        pieces[i].cells.resize(4);
+        for (int j = 0; j < 4; j++) {
+            pieces[i].cells[j].first = *p++;
+            pieces[i].cells[j].second = *p++;
+        }
+    }
+    unsigned int lo = (unsigned int)*p++;
+    unsigned int hi = (unsigned int)*p++;
+    dfsCount = ((long long)hi << 32) | lo;
+}
 
 // stav solveru – deska, umisteni, nejlepsi reseni.
 struct Solver {
@@ -300,54 +412,195 @@ void dfs(Solver& solver, SearchState& state, int startPos,
     state.cellState[r][c] = 0;   // backtracking
 }
 
-int solve(Solver& solver) {
-    //horni odhad = soucet vsech kladnych policek
+// Slave: lokalni DFS reseni jednoho WorkItemu s OpenMP
+void solveLocal(Solver& solver, WorkItem& wi) {
+    solver.dfsCallCount = 0;
+
+    // Rozbalime WorkItem do sub-uloh pro OMP paralelismus
+    int totalCells = solver.board.rows * solver.board.cols;
+    int subDepth = std::clamp(totalCells / 6, 2, 16);
+
+    std::vector<WorkItem> subQueue;
+    SearchState tmpState = wi.state;
+    dfs(solver, tmpState, wi.startPos, wi.currentScore,
+        wi.remainingPosSum, 0, &subQueue, subDepth);
+
+    if (subQueue.empty()) return;
+
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < (int)subQueue.size(); i++) {
+        SearchState localState = subQueue[i].state;
+        dfs(solver, localState, subQueue[i].startPos,
+            subQueue[i].currentScore, subQueue[i].remainingPosSum, 0);
+    }
+}
+
+// ---- MASTER ----
+int solveMaster(Solver& solver, int numProcs) {
+    int rows = solver.board.rows;
+    int cols = solver.board.cols;
+
+    // Horni odhad = soucet vsech kladnych policek
     int remainingPosSum = 0;
-    for (int r = 0; r < solver.board.rows; r++)
-        for (int c = 0; c < solver.board.cols; c++)
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
 
-    // Adaptivni hloubka rozbaleni: skala s velikosti desky
-    int totalCells = solver.board.rows * solver.board.cols;
-    int expandDepth = std::clamp(totalCells / 8, 2, 32);
+    // Expanze pocatecnich stavu
+    int totalCells = rows * cols;
+    int expandDepth = std::clamp(totalCells / 4, 2, 32);
 
     SearchState initState;
-    initState.cellState.assign(solver.board.rows,
-                               std::vector<int>(solver.board.cols, 0));
+    initState.cellState.assign(rows, std::vector<int>(cols, 0));
 
-    // Predgeneravni pocatecnich stavu (rozbal strom do urcite hloubky)
     std::vector<WorkItem> workQueue;
-    dfs(solver, initState, 0, 0, remainingPosSum, 0,
-        &workQueue, expandDepth);
+    dfs(solver, initState, 0, 0, remainingPosSum, 0, &workQueue, expandDepth);
 
-    std::cout << "Spousteni DFS resice...\n";
-    std::cout << "  Pocatecni horni odhad (soucet kladnych): "
-              << remainingPosSum << "\n";
-    std::cout << "  Pocet vlaken: " << omp_get_max_threads() << "\n";
-    std::cout << "  Vygenerovano pocatecnich stavu: "
-              << workQueue.size() << "\n";
+    std::cout << "Spousteni MPI Master-Slave resice...\n";
+    std::cout << "  Pocatecni horni odhad (soucet kladnych): " << remainingPosSum << "\n";
+    std::cout << "  Pocet MPI procesu: " << numProcs << "\n";
+    std::cout << "  Pocet OMP vlaken: " << omp_get_max_threads() << "\n";
+    std::cout << "  Vygenerovano pocatecnich stavu: " << workQueue.size() << "\n";
 
     auto t0 = std::chrono::steady_clock::now();
 
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int i = 0; i < (int)workQueue.size(); i++) {
-        SearchState localState = workQueue[i].state;
-        dfs(solver, localState, workQueue[i].startPos,
-            workQueue[i].currentScore, workQueue[i].remainingPosSum, 0);
+    int numSlaves = numProcs - 1;
+    int nextWork = 0;
+    int activeSlaves = 0;
+    long long totalDfs = 0;
+
+    // Pocatecni rozeslani prace
+    for (int slave = 1; slave <= numSlaves && nextWork < (int)workQueue.size(); slave++, nextWork++) {
+        auto buf = serializeWorkItem(workQueue[nextWork], rows, cols, solver.bestScore);
+        int sz = (int)buf.size();
+        MPI_Send(&sz, 1, MPI_INT, slave, TAG_WORK, MPI_COMM_WORLD);
+        MPI_Send(buf.data(), sz, MPI_BYTE, slave, TAG_WORK, MPI_COMM_WORLD);
+        activeSlaves++;
+    }
+
+    // Prijimani vysledku, lokalni prace mastera a rozesılani dalsi prace
+    while (activeSlaves > 0 || nextWork < (int)workQueue.size()) {
+        // Zkontroluj, zda prisel vysledek od slave
+        int flag = 0;
+        MPI_Status status;
+        if (activeSlaves > 0) {
+            MPI_Iprobe(MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &flag, &status);
+        }
+
+        if (flag) {
+            // Prijmi vysledek
+            int resSz;
+            MPI_Recv(&resSz, 1, MPI_INT, status.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
+            int slave = status.MPI_SOURCE;
+
+            std::vector<char> resBuf(resSz);
+            MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
+
+            int slaveScore;
+            std::vector<std::vector<int>> slaveCellState;
+            std::vector<Piece> slavePieces;
+            long long slaveDfs;
+            deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
+            totalDfs += slaveDfs;
+
+            if (slaveScore > solver.bestScore) {
+                solver.bestScore = slaveScore;
+                solver.bestCellState = slaveCellState;
+                solver.bestPlacedPieces = slavePieces;
+            }
+
+            // Poslat dalsi praci nebo ukoncit slave
+            if (nextWork < (int)workQueue.size()) {
+                auto buf = serializeWorkItem(workQueue[nextWork], rows, cols, solver.bestScore);
+                int sz = (int)buf.size();
+                MPI_Send(&sz, 1, MPI_INT, slave, TAG_WORK, MPI_COMM_WORLD);
+                MPI_Send(buf.data(), sz, MPI_BYTE, slave, TAG_WORK, MPI_COMM_WORLD);
+                nextWork++;
+            } else {
+                int dummy = 0;
+                MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
+                activeSlaves--;
+            }
+        } else if (nextWork < (int)workQueue.size()) {
+            // Zadny vysledek neceka — master si vezme praci sam
+            solveLocal(solver, workQueue[nextWork]);
+            totalDfs += solver.dfsCallCount;
+            nextWork++;
+        } else {
+            // Vsechna prace rozdana, cekame na posledni slave — blokujici recv
+            int resSz;
+            MPI_Recv(&resSz, 1, MPI_INT, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
+            int slave = status.MPI_SOURCE;
+
+            std::vector<char> resBuf(resSz);
+            MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
+
+            int slaveScore;
+            std::vector<std::vector<int>> slaveCellState;
+            std::vector<Piece> slavePieces;
+            long long slaveDfs;
+            deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
+            totalDfs += slaveDfs;
+
+            if (slaveScore > solver.bestScore) {
+                solver.bestScore = slaveScore;
+                solver.bestCellState = slaveCellState;
+                solver.bestPlacedPieces = slavePieces;
+            }
+
+            int dummy = 0;
+            MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
+            activeSlaves--;
+        }
     }
 
     auto t1 = std::chrono::steady_clock::now();
     solver.elapsedSec = std::chrono::duration<double>(t1 - t0).count();
+    solver.dfsCallCount = totalDfs;
 
     std::cout << "DFS dokonceno.\n";
     std::cout << "  Cas reseni: " << solver.elapsedSec << " s\n";
     std::cout << "  Pocet volani DFS: " << solver.dfsCallCount << "\n";
     std::cout << "  Nejlepsi skore: " << solver.bestScore << "\n";
-    std::cout << "  Pocet umistenych quatromin: "
-              << solver.bestPlacedPieces.size() << "\n";
+    std::cout << "  Pocet umistenych quatromin: " << solver.bestPlacedPieces.size() << "\n";
 
     return solver.bestScore;
+}
+
+// ---- SLAVE ----
+void runSlave(Solver& solver) {
+    int rows = solver.board.rows;
+    int cols = solver.board.cols;
+
+    while (true) {
+        MPI_Status status;
+        int sz;
+        MPI_Recv(&sz, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+        if (status.MPI_TAG == TAG_TERMINATE) break;
+
+        std::vector<char> buf(sz);
+        MPI_Recv(buf.data(), sz, MPI_BYTE, 0, TAG_WORK, MPI_COMM_WORLD, &status);
+
+        int masterBest;
+        WorkItem wi = deserializeWorkItem(buf, rows, cols, masterBest);
+
+        // Aktualizuj lokalni best z mastera
+        if (masterBest > solver.bestScore) {
+            solver.bestScore = masterBest;
+        }
+
+        solveLocal(solver, wi);
+
+        // Posli vysledek zpet
+        auto resBuf = serializeResult(solver.bestScore, solver.bestCellState,
+                                       solver.bestPlacedPieces, solver.dfsCallCount,
+                                       rows, cols);
+        int resSz = (int)resBuf.size();
+        MPI_Send(&resSz, 1, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+        MPI_Send(resBuf.data(), resSz, MPI_BYTE, 0, TAG_RESULT, MPI_COMM_WORLD);
+    }
 }
 
 // Vystup reseni
@@ -396,10 +649,19 @@ void writeSolution(std::ostream& out, const Board& board,
         << " (T: " << tCount << ", L: " << lCount << ")\n";
     out << "Cas reseni: " << elapsedSec << " s\n";
     out << "Pocet volani DFS: " << dfsCallCount << "\n";
-    out << "Pocet vlaken: " << omp_get_max_threads() << "\n";
+    int mpiSize = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
+    out << "Pocet MPI procesu: " << mpiSize << "\n";
+    out << "Pocet OMP vlaken: " << omp_get_max_threads() << "\n";
 }
 
 int main(int argc, char* argv[]) {
+    MPI_Init(&argc, &argv);
+
+    int rank, numProcs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank); //0 - master, ostatni slave
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcs); // 4
+
     std::string inputName = argv[1];
     std::string inputPath = "mapb/" + inputName;
 
@@ -408,62 +670,65 @@ int main(int argc, char* argv[]) {
         omp_set_num_threads(nThreads);
     }
 
-    //Nacteni desky
+    // Vsechny procesy nacitaji desku a pripravuji solver
     Board board;
     try {
         board = loadBoard(inputPath);
     } catch (const std::exception& e) {
         std::cerr << "Chyba: " << e.what() << "\n";
+        MPI_Finalize();
         return 1;
     }
 
-    std::cout << "Nactena deska ze souboru: " << inputPath << "\n";
-    printBoard(board);
-
-    int totalSum = 0;
-    for (int r = 0; r < board.rows; r++)
-        for (int c = 0; c < board.cols; c++)
-            totalSum += board.cells[r][c];
-    std::cout << "Soucet vsech policek: " << totalSum << "\n\n";
-
-
-    // Predvypocet vsech moznych umisteni
-    std::vector<Piece> allPlacements =
-        generateAllPlacements(board, getAllShapes());
-
-    // DFS reseni
+    std::vector<Piece> allPlacements = generateAllPlacements(board, getAllShapes());
     Solver solver;
     initSolver(solver, board, allPlacements);
-    int bestScore = solve(solver);
 
-    // Vypis vysledku
-    std::cout << "\n========== VYSLEDEK ==========\n";
-    std::cout << "Maximalni skore: " << bestScore << "\n";
-    std::cout << "Zlepseni pokrytim: " << (bestScore - totalSum) << "\n\n";
+    if (rank == 0) {
+        // ---- MASTER ----
+        std::cout << "Nactena deska ze souboru: " << inputPath << "\n";
+        printBoard(board);
 
-    writeSolution(std::cout, board, solver.bestCellState,
-                  solver.bestPlacedPieces, bestScore,
-                  solver.elapsedSec, solver.dfsCallCount);
+        int totalSum = 0;
+        for (int r = 0; r < board.rows; r++)
+            for (int c = 0; c < board.cols; c++)
+                totalSum += board.cells[r][c];
+        std::cout << "Soucet vsech policek: " << totalSum << "\n\n";
 
-    // Ulozeni do souboru
-    std::filesystem::create_directories("mapsol");
-    std::time_t now = std::time(nullptr);
-    char timeStr[64];
-    std::strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S",
-                  std::localtime(&now));
+        int bestScore = solveMaster(solver, numProcs);
 
-    std::string baseName = inputName;
-    size_t dot = baseName.rfind('.');
-    if (dot != std::string::npos) baseName = baseName.substr(0, dot);
+        std::cout << "\n========== VYSLEDEK ==========\n";
+        std::cout << "Maximalni skore: " << bestScore << "\n";
+        std::cout << "Zlepseni pokrytim: " << (bestScore - totalSum) << "\n\n";
 
-    std::string outputPath = "mapsol/" + baseName + "_sol_data_par_" + timeStr + ".txt";
-    std::ofstream fout(outputPath);
-    if (fout.is_open()) {
-        writeSolution(fout, board, solver.bestCellState,
+        writeSolution(std::cout, board, solver.bestCellState,
                       solver.bestPlacedPieces, bestScore,
                       solver.elapsedSec, solver.dfsCallCount);
-        std::cout << "Reseni ulozeno do: " << outputPath << "\n";
+
+        // Ulozeni do souboru
+        std::filesystem::create_directories("mapsol");
+        std::time_t now = std::time(nullptr);
+        char timeStr[64];
+        std::strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S",
+                      std::localtime(&now));
+
+        std::string baseName = inputName;
+        size_t dot = baseName.rfind('.');
+        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
+
+        std::string outputPath = "mapsol/" + baseName + "_sol_mpi_" + timeStr + ".txt";
+        std::ofstream fout(outputPath);
+        if (fout.is_open()) {
+            writeSolution(fout, board, solver.bestCellState,
+                          solver.bestPlacedPieces, bestScore,
+                          solver.elapsedSec, solver.dfsCallCount);
+            std::cout << "Reseni ulozeno do: " << outputPath << "\n";
+        }
+    } else {
+        // ---- SLAVE ----
+        runSlave(solver);
     }
 
+    MPI_Finalize();
     return 0;
 }

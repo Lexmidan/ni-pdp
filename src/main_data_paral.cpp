@@ -310,7 +310,7 @@ int solve(Solver& solver) {
 
     // Adaptivni hloubka rozbaleni: skala s velikosti desky
     int totalCells = solver.board.rows * solver.board.cols;
-    int expandDepth = std::clamp(totalCells / 8, 2, 32);
+    int expandDepth = std::clamp(totalCells / 4, 2, 32);
 
     SearchState initState;
     initState.cellState.assign(solver.board.rows,
