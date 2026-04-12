@@ -5,3 +5,6 @@ mapsol_old
 prompts
 mapsol
 *.pdf
+*.err
+*.out
+sqx_mpi
