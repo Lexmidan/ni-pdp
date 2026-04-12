@@ -465,5 +465,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Reseni ulozeno do: " << outputPath << "\n";
     }
 
+    // Structured output for benchmarking (CSV: variant,input,threads,score,dfs_calls,time_sec)
+    std::cout << "BENCH_RESULT,data_paral," << inputName << ","
+              << omp_get_max_threads() << ","
+              << bestScore << "," << solver.dfsCallCount << ","
+              << solver.elapsedSec << "\n";
+
     return 0;
 }

@@ -416,5 +416,10 @@ int main(int argc, char* argv[]) {
         std::cout << "Reseni ulozeno do: " << outputPath << "\n";
     }
 
+    // Structured output for benchmarking (CSV: variant,input,threads,score,dfs_calls,time_sec)
+    std::cout << "BENCH_RESULT,sequential," << inputName << ",1,"
+              << bestScore << "," << solver.dfsCallCount << ","
+              << solver.elapsedSec << "\n";
+
     return 0;
 }
