@@ -3,7 +3,7 @@
 #SBATCH --output="sqx_bench-%J.out"
 #SBATCH --error="sqx_bench-%J.err"
 #SBATCH --exclusive
-#SBATCH --partition=arm_long
+#SBATCH --partition=arm_serial
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
 
@@ -24,5 +24,5 @@ CC -O2 -std=c++17 -o build/sqx_seq src/main_sequential.cpp
 CC -O2 -std=c++17 -fopenmp -o build/sqx_task src/main_task_paral.cpp
 CC -O2 -std=c++17 -fopenmp -o build/sqx_data src/main_data_paral.cpp
 
-# Run benchmark (3 repetitions per config)
-bash benchmark.sh 3
+# Run benchmark (20 repetitions per config)
+bash benchmark.sh 10

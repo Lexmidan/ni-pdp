@@ -2,15 +2,15 @@
 # Benchmark orchestrator for sequential, task-parallel, and data-parallel solvers.
 #
 # Usage:  ./benchmark.sh [RUNS]
-#   RUNS = number of repetitions per configuration (default: 3)
+#   RUNS = number of repetitions per configuration (default: 20)
 #
 # Output: results are appended to bench_results.csv
 #         (one BENCH_RESULT line per run, extracted from program stdout)
 
 set -euo pipefail
 
-RUNS="${1:-3}"
-RESULT_FILE="bench_results.csv"
+RUNS="${1:-20}"
+RESULT_FILE="bench_results_no_dfs_count.csv"
 MAPB_DIR="mapb"
 
 THREAD_COUNTS=(1 2 4 12 16 32 48)
@@ -22,7 +22,7 @@ BIN_DATA="./build/sqx_data"
 
 # Write CSV header if file doesn't exist
 if [[ ! -f "$RESULT_FILE" ]]; then
-    echo "variant,input,threads,score,dfs_calls,time_sec,run" > "$RESULT_FILE"
+    echo "variant,input,threads,score,time_sec,run" > "$RESULT_FILE"
 fi
 
 # Collect input files

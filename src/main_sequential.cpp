@@ -42,7 +42,6 @@ struct Solver {
     int pieceCounter;
 
     // Statistiky
-    long long dfsCallCount;
     double elapsedSec;
 
     // Nejlepsi nalezene reseni
@@ -154,7 +153,6 @@ void initSolver(Solver& solver, const Board& board,
     solver.board = board;
     solver.allPlacements = placements;
     solver.pieceCounter = 0;
-    solver.dfsCallCount = 0;
     solver.bestScore = INT_MIN;
 
     solver.cellState.assign(board.rows, std::vector<int>(board.cols, 0));
@@ -205,8 +203,6 @@ void initSolver(Solver& solver, const Board& board,
 // Orezavani: pokud currentScore + soucet kladnych zbylych policek
 // nemuze prekonat nejlepsi reseni, vetev se oreze.
 void dfs(Solver& solver, int startPos, int currentScore, int remainingPosSum) {
-
-    solver.dfsCallCount++;
 
     int cols = solver.board.cols;
     int totalCells = solver.board.rows * cols;
@@ -299,7 +295,6 @@ int solve(Solver& solver) {
 
     std::cout << "DFS dokonceno.\n";
     std::cout << "  Cas reseni: " << solver.elapsedSec << " s\n";
-    std::cout << "  Pocet volani DFS: " << solver.dfsCallCount << "\n";
     std::cout << "  Nejlepsi skore: " << solver.bestScore << "\n";
     std::cout << "  Pocet umistenych quatromin: "
               << solver.bestPlacedPieces.size() << "\n";
@@ -311,7 +306,7 @@ int solve(Solver& solver) {
 void writeSolution(std::ostream& out, const Board& board,
                    const std::vector<std::vector<int>>& cellState,
                    const std::vector<Piece>& placedPieces, int score,
-                   double elapsedSec, long long dfsCallCount) {
+                   double elapsedSec) {
 
     // Prirad label kazdemu kusu (T1, T2, L1, L2, ...)
     int tCount = 0, lCount = 0;
@@ -352,7 +347,6 @@ void writeSolution(std::ostream& out, const Board& board,
     out << "Pocet umistenych quatromin: " << placedPieces.size()
         << " (T: " << tCount << ", L: " << lCount << ")\n";
     out << "Cas reseni: " << elapsedSec << " s\n";
-    out << "Pocet volani DFS: " << dfsCallCount << "\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -394,7 +388,7 @@ int main(int argc, char* argv[]) {
 
     writeSolution(std::cout, board, solver.bestCellState,
                   solver.bestPlacedPieces, bestScore,
-                  solver.elapsedSec, solver.dfsCallCount);
+                  solver.elapsedSec);
 
     // Ulozeni do souboru
     std::filesystem::create_directories("mapsol");
@@ -412,14 +406,13 @@ int main(int argc, char* argv[]) {
     if (fout.is_open()) {
         writeSolution(fout, board, solver.bestCellState,
                       solver.bestPlacedPieces, bestScore,
-                      solver.elapsedSec, solver.dfsCallCount);
+                      solver.elapsedSec);
         std::cout << "Reseni ulozeno do: " << outputPath << "\n";
     }
 
     // Structured output for benchmarking (CSV: variant,input,threads,score,dfs_calls,time_sec)
     std::cout << "BENCH_RESULT,sequential," << inputName << ",1,"
-              << bestScore << "," << solver.dfsCallCount << ","
-              << solver.elapsedSec << "\n";
+              << bestScore << "," << solver.elapsedSec << "\n";
 
     return 0;
 }

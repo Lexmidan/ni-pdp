@@ -104,12 +104,12 @@ WorkItem deserializeWorkItem(const std::vector<char>& buf, int rows, int cols, i
     return wi;
 }
 
-// Serializace vysledku: bestScore | numPieces | cellState | pieces | dfsCallCount(as 2 ints)
+// Serializace vysledku: bestScore | numPieces | cellState | pieces
 std::vector<char> serializeResult(int score, const std::vector<std::vector<int>>& cellState,
-                                   const std::vector<Piece>& pieces, long long dfsCount,
+                                   const std::vector<Piece>& pieces,
                                    int rows, int cols) {
     int numPieces = (int)pieces.size();
-    int intCount = 2 + rows * cols + numPieces * 9 + 2; // +2 for dfsCount as two ints
+    int intCount = 2 + rows * cols + numPieces * 9;
     std::vector<char> buf(intCount * sizeof(int));
     int* p = reinterpret_cast<int*>(buf.data());
 
@@ -125,15 +125,12 @@ std::vector<char> serializeResult(int score, const std::vector<std::vector<int>>
             *p++ = cc;
         }
     }
-    // dfsCallCount as two 32-bit ints
-    *p++ = (int)(dfsCount & 0xFFFFFFFF);
-    *p++ = (int)((dfsCount >> 32) & 0xFFFFFFFF);
     return buf;
 }
 
 void deserializeResult(const std::vector<char>& buf, int rows, int cols,
                        int& score, std::vector<std::vector<int>>& cellState,
-                       std::vector<Piece>& pieces, long long& dfsCount) {
+                       std::vector<Piece>& pieces) {
     const int* p = reinterpret_cast<const int*>(buf.data());
     score = *p++;
     int numPieces = *p++;
@@ -150,9 +147,6 @@ void deserializeResult(const std::vector<char>& buf, int rows, int cols,
             pieces[i].cells[j].second = *p++;
         }
     }
-    unsigned int lo = (unsigned int)*p++;
-    unsigned int hi = (unsigned int)*p++;
-    dfsCount = ((long long)hi << 32) | lo;
 }
 
 // stav solveru – deska, umisteni, nejlepsi reseni.
@@ -163,7 +157,6 @@ struct Solver {
     std::vector<std::vector<std::vector<int>>> placementsForCell;
 
     // Statistiky
-    long long dfsCallCount;
     double elapsedSec;
 
     // Nejlepsi nalezene reseni (sdilene, chranene #pragma omp critical)
@@ -274,7 +267,6 @@ void initSolver(Solver& solver, const Board& board,
     const std::vector<Piece>& placements) {
     solver.board = board;
     solver.allPlacements = placements;
-    solver.dfsCallCount = 0;
     solver.bestScore = INT_MIN;
 
     solver.placementsForCell.assign(board.rows,
@@ -338,11 +330,6 @@ void dfs(Solver& solver, SearchState& state, int startPos,
     if (workQueue && (startPos >= totalCells || depth >= maxExpandDepth)) {
         workQueue->push_back({state, startPos, currentScore, remainingPosSum});
         return;
-    }
-
-    if (!workQueue) {
-        #pragma omp atomic
-        solver.dfsCallCount++;
     }
 
     // Vsechna policka rozhodnuta => koncovy stav
@@ -414,7 +401,6 @@ void dfs(Solver& solver, SearchState& state, int startPos,
 
 // Slave: lokalni DFS reseni jednoho WorkItemu s OpenMP
 void solveLocal(Solver& solver, WorkItem& wi) {
-    solver.dfsCallCount = 0;
 
     // Rozbalime WorkItem do sub-uloh pro OMP paralelismus
     int totalCells = solver.board.rows * solver.board.cols;
@@ -468,7 +454,6 @@ int solveMaster(Solver& solver, int numProcs) {
     int numSlaves = numProcs - 1;
     int nextWork = 0;
     int activeSlaves = 0;
-    long long totalDfs = 0;
 
     // Pocatecni rozeslani prace
     for (int slave = 1; slave <= numSlaves && nextWork < (int)workQueue.size(); slave++, nextWork++) {
@@ -492,9 +477,7 @@ int solveMaster(Solver& solver, int numProcs) {
         int slaveScore;
         std::vector<std::vector<int>> slaveCellState;
         std::vector<Piece> slavePieces;
-        long long slaveDfs;
-        deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces, slaveDfs);
-        totalDfs += slaveDfs;
+        deserializeResult(resBuf, rows, cols, slaveScore, slaveCellState, slavePieces);
 
         if (slaveScore > solver.bestScore) {
             solver.bestScore = slaveScore;
@@ -518,11 +501,9 @@ int solveMaster(Solver& solver, int numProcs) {
 
     auto t1 = std::chrono::steady_clock::now();
     solver.elapsedSec = std::chrono::duration<double>(t1 - t0).count();
-    solver.dfsCallCount = totalDfs;
 
     std::cout << "DFS dokonceno.\n";
     std::cout << "  Cas reseni: " << solver.elapsedSec << " s\n";
-    std::cout << "  Pocet volani DFS: " << solver.dfsCallCount << "\n";
     std::cout << "  Nejlepsi skore: " << solver.bestScore << "\n";
     std::cout << "  Pocet umistenych quatromin: " << solver.bestPlacedPieces.size() << "\n";
 
@@ -556,7 +537,7 @@ void runSlave(Solver& solver) {
 
         // Posli vysledek zpet
         auto resBuf = serializeResult(solver.bestScore, solver.bestCellState,
-                                       solver.bestPlacedPieces, solver.dfsCallCount,
+                                       solver.bestPlacedPieces,
                                        rows, cols);
         int resSz = (int)resBuf.size();
         MPI_Send(&resSz, 1, MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
@@ -568,7 +549,7 @@ void runSlave(Solver& solver) {
 void writeSolution(std::ostream& out, const Board& board,
                    const std::vector<std::vector<int>>& cellState,
                    const std::vector<Piece>& placedPieces, int score,
-                   double elapsedSec, long long dfsCallCount) {
+                   double elapsedSec) {
 
     // Prirad label kazdemu kusu (T1, T2, L1, L2, ...)
     int tCount = 0, lCount = 0;
@@ -609,7 +590,6 @@ void writeSolution(std::ostream& out, const Board& board,
     out << "Pocet umistenych quatromin: " << placedPieces.size()
         << " (T: " << tCount << ", L: " << lCount << ")\n";
     out << "Cas reseni: " << elapsedSec << " s\n";
-    out << "Pocet volani DFS: " << dfsCallCount << "\n";
     int mpiSize = 1;
     MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
     out << "Pocet MPI procesu: " << mpiSize << "\n";
@@ -664,7 +644,7 @@ int main(int argc, char* argv[]) {
 
         writeSolution(std::cout, board, solver.bestCellState,
                       solver.bestPlacedPieces, bestScore,
-                      solver.elapsedSec, solver.dfsCallCount);
+                      solver.elapsedSec);
 
         // Ulozeni do souboru
         std::filesystem::create_directories("mapsol");
@@ -682,7 +662,7 @@ int main(int argc, char* argv[]) {
         if (fout.is_open()) {
             writeSolution(fout, board, solver.bestCellState,
                           solver.bestPlacedPieces, bestScore,
-                          solver.elapsedSec, solver.dfsCallCount);
+                          solver.elapsedSec);
             std::cout << "Reseni ulozeno do: " << outputPath << "\n";
         }
     } else {
