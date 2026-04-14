@@ -89,5 +89,5 @@ for input in "${INPUTS[@]}"; do
 done
 
 echo ""
-echo "=== Benchmark finished: $(date) ==="
+echo "Benchmark finished: $(date)"
 echo "Results in $RESULT_FILE"

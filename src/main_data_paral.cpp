@@ -294,20 +294,22 @@ void dfs(Solver& solver, SearchState& state, int startPos,
 }
 
 int solve(Solver& solver) {
-    //horni odhad = soucet vsech kladnych policek
+    int rows = solver.board.rows;
+    int cols = solver.board.cols;
+
+    // Horni odhad = soucet vsech kladnych policek
     int remainingPosSum = 0;
-    for (int r = 0; r < solver.board.rows; r++)
-        for (int c = 0; c < solver.board.cols; c++)
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
 
-    // Adaptivni hloubka rozbaleni: skala s velikosti desky
-    int totalCells = solver.board.rows * solver.board.cols;
+    // Expanze pocatecnich stavu
+    int totalCells = rows * cols;
     int expandDepth = std::clamp(totalCells / 4, 2, 32);
 
     SearchState initState;
-    initState.cellState.assign(solver.board.rows,
-                               std::vector<int>(solver.board.cols, 0));
+    initState.cellState.assign(rows, std::vector<int>(cols, 0));
 
     // Predgeneravni pocatecnich stavu (rozbal strom do urcite hloubky)
     std::vector<WorkItem> workQueue;

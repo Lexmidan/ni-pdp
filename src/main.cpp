@@ -1,5 +1,5 @@
 /*
- * MPI + OpenMP reseni (Master-Slave)
+ * MPI + OpenMP reseni
  * Pouziti:
  *   mpirun -np <N> sqx <vstupni_soubor> [pocet_omp_vlaken]
  *
@@ -50,7 +50,7 @@ static const int TAG_WORK = 1;
 static const int TAG_RESULT = 2;
 static const int TAG_TERMINATE = 3;
 
-// ---- Serializace WorkItem do/z souvisleho bufferu ----
+//  Serializace
 std::vector<char> serializeWorkItem(const WorkItem& wi, int rows, int cols, int bestScore) {
     // Format: bestScore | startPos | currentScore | remainingPosSum | pieceCounter
     //       | cellState[rows*cols] | numPieces | pieces (type + 4x(r,c))
@@ -268,6 +268,7 @@ void initSolver(Solver& solver, const Board& board,
     solver.board = board;
     solver.allPlacements = placements;
     solver.bestScore = INT_MIN;
+    solver.bestCellState.assign(board.rows, std::vector<int>(board.cols, 0));
 
     solver.placementsForCell.assign(board.rows,
         std::vector<std::vector<int>>(board.cols));
@@ -334,12 +335,14 @@ void dfs(Solver& solver, SearchState& state, int startPos,
 
     // Vsechna policka rozhodnuta => koncovy stav
     if (startPos >= totalCells) {
-        #pragma omp critical
-        {
-            if (currentScore > solver.bestScore) {
-                solver.bestScore = currentScore;
-                solver.bestCellState = state.cellState;
-                solver.bestPlacedPieces = state.placedPieces;
+        if (currentScore > solver.bestScore) {
+            #pragma omp critical
+            {
+                if (currentScore > solver.bestScore) {
+                    solver.bestScore = currentScore;
+                    solver.bestCellState = state.cellState;
+                    solver.bestPlacedPieces = state.placedPieces;
+                }
             }
         }
         return;
@@ -421,7 +424,7 @@ void solveLocal(Solver& solver, WorkItem& wi) {
     }
 }
 
-// ---- MASTER ----
+// MASTER
 int solveMaster(Solver& solver, int numProcs) {
     int rows = solver.board.rows;
     int cols = solver.board.cols;
@@ -442,6 +445,11 @@ int solveMaster(Solver& solver, int numProcs) {
 
     std::vector<WorkItem> workQueue;
     dfs(solver, initState, 0, 0, remainingPosSum, 0, &workQueue, expandDepth);
+
+    // Seradime work items podle potencialu (nejlepsi prvni) pro lepsi orezavani
+    std::sort(workQueue.begin(), workQueue.end(), [](const WorkItem& a, const WorkItem& b) {
+        return (a.currentScore + a.remainingPosSum) > (b.currentScore + b.remainingPosSum);
+    });
 
     std::cout << "Spousteni MPI Master-Slave resice...\n";
     std::cout << "  Pocatecni horni odhad (soucet kladnych): " << remainingPosSum << "\n";
@@ -464,6 +472,12 @@ int solveMaster(Solver& solver, int numProcs) {
         activeSlaves++;
     }
 
+    // Ukonceni slave procesu, ktere nedostaly zadnou praci
+    for (int slave = activeSlaves + 1; slave <= numSlaves; slave++) {
+        int dummy = 0;
+        MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
+    }
+
     // Prijimani vysledku a rozesılani dalsi prace
     while (activeSlaves > 0) {
         MPI_Status status;
@@ -483,6 +497,12 @@ int solveMaster(Solver& solver, int numProcs) {
             solver.bestScore = slaveScore;
             solver.bestCellState = slaveCellState;
             solver.bestPlacedPieces = slavePieces;
+        }
+
+        // Preskoc work items, ktere uz nemohou zlepsit nejlepsi reseni
+        while (nextWork < (int)workQueue.size() &&
+               workQueue[nextWork].currentScore + workQueue[nextWork].remainingPosSum <= solver.bestScore) {
+            nextWork++;
         }
 
         // Poslat dalsi praci nebo ukoncit
@@ -510,7 +530,7 @@ int solveMaster(Solver& solver, int numProcs) {
     return solver.bestScore;
 }
 
-// ---- SLAVE ----
+// SLAVE
 void runSlave(Solver& solver) {
     int rows = solver.board.rows;
     int cols = solver.board.cols;
@@ -626,7 +646,7 @@ int main(int argc, char* argv[]) {
     initSolver(solver, board, allPlacements);
 
     if (rank == 0) {
-        // ---- MASTER ----
+        // MASTER 
         std::cout << "Nactena deska ze souboru: " << inputPath << "\n";
         printBoard(board);
 
@@ -665,8 +685,12 @@ int main(int argc, char* argv[]) {
                           solver.elapsedSec);
             std::cout << "Reseni ulozeno do: " << outputPath << "\n";
         }
+
+        std::cout << "BENCH_RESULT,mpi," << inputName << ","
+                  << omp_get_max_threads() << "," << bestScore << ","
+                  << solver.elapsedSec << "\n";
     } else {
-        // ---- SLAVE ----
+        //  SLAVE 
         runSlave(solver);
     }
 
