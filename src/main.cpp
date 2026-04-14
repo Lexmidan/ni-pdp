@@ -451,11 +451,11 @@ int solveMaster(Solver& solver, int numProcs) {
         return (a.currentScore + a.remainingPosSum) > (b.currentScore + b.remainingPosSum);
     });
 
-    std::cout << "Spousteni MPI Master-Slave resice...\n";
-    std::cout << "  Pocatecni horni odhad (soucet kladnych): " << remainingPosSum << "\n";
-    std::cout << "  Pocet MPI procesu: " << numProcs << "\n";
-    std::cout << "  Pocet OMP vlaken: " << omp_get_max_threads() << "\n";
-    std::cout << "  Vygenerovano pocatecnich stavu: " << workQueue.size() << "\n";
+    // std::cout << "Spousteni MPI Master-Slave resice...\n";
+    // std::cout << "  Pocatecni horni odhad (soucet kladnych): " << remainingPosSum << "\n";
+    // std::cout << "  Pocet MPI procesu: " << numProcs << "\n";
+    // std::cout << "  Pocet OMP vlaken: " << omp_get_max_threads() << "\n";
+    // std::cout << "  Vygenerovano pocatecnich stavu: " << workQueue.size() << "\n";
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -647,8 +647,8 @@ int main(int argc, char* argv[]) {
 
     if (rank == 0) {
         // MASTER 
-        std::cout << "Nactena deska ze souboru: " << inputPath << "\n";
-        printBoard(board);
+        // std::cout << "Nactena deska ze souboru: " << inputPath << "\n";
+        // printBoard(board);
 
         int totalSum = 0;
         for (int r = 0; r < board.rows; r++)
@@ -658,9 +658,9 @@ int main(int argc, char* argv[]) {
 
         int bestScore = solveMaster(solver, numProcs);
 
-        std::cout << "\n========== VYSLEDEK ==========\n";
-        std::cout << "Maximalni skore: " << bestScore << "\n";
-        std::cout << "Zlepseni pokrytim: " << (bestScore - totalSum) << "\n\n";
+        // std::cout << "\n!!! VYSLEDEK !!!\n";
+        // std::cout << "Maximalni skore: " << bestScore << "\n";
+        // std::cout << "Zlepseni pokrytim: " << (bestScore - totalSum) << "\n\n";
 
         writeSolution(std::cout, board, solver.bestCellState,
                       solver.bestPlacedPieces, bestScore,

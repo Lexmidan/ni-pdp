@@ -24,8 +24,8 @@ fi
 
 for input in mapb/*.txt; do
     input=$(basename "$input")
-    for run in $(seq 1 10); do
-        echo "[$run/10] $input"
+    for run in $(seq 1 20); do
+        echo "[$run/20] $input"
         output=$(srun ./build/sqx_mpi "$input" 48 2>&1) || true
         line=$(echo "$output" | grep "^BENCH_RESULT," || true)
         if [[ -n "$line" ]]; then
