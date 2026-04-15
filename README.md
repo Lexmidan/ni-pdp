@@ -26,10 +26,10 @@ Například maticový popis řešení pro desku 4x4 může vypadat takto:
 
 
 # Kód
-- `src/main.cpp` obsahuje implementaci sekvenčního řešení úlohy
+- `src/main.cpp` obsahuje implementaci MPI+OpenMP řešení úlohy
 - `src/main_task_paral.cpp` obsahuje implementaci paralelního řešení pomocí task paralelismu
 - `src/main_data_paral.cpp` obsahuje implementaci paralelního řešení pomocí datového paralelismu.
-- `src/main_mpi.cpp` obsahuje implementaci paralelního řešení pomocí MPI ˇ+ datového paralelismu.
+- `src/main_sequential.cpp` obsahuje implementaci sekvenčního řešení úlohy.
 
 
 
