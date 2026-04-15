@@ -52,10 +52,11 @@ static const int TAG_TERMINATE = 3;
 
 //  Serializace
 std::vector<char> serializeWorkItem(const WorkItem& wi, int rows, int cols, int bestScore) {
-    // Format: bestScore | startPos | currentScore | remainingPosSum | pieceCounter
-    //       | cellState[rows*cols] | numPieces | pieces (type + 4x(r,c))
+    // bestScore | startPos | currentScore | 
+    // remainingPosSum | pieceCounter | cellState[rows*cols] | numPieces 
+    // | pieces (type + 4x(r,c))
     int numPieces = (int)wi.state.placedPieces.size();
-    int intCount = 5 + rows * cols + 1 + numPieces * 9; // 9 ints per piece: type + 4*(r,c)
+    int intCount = 5 + rows * cols + 1 + numPieces * 9; // 5 for 9 ints per piece: type + 4*(r,c)
     std::vector<char> buf(intCount * sizeof(int));
     int* p = reinterpret_cast<int*>(buf.data());
 
@@ -436,15 +437,23 @@ int solveMaster(Solver& solver, int numProcs) {
             if (solver.board.cells[r][c] > 0)
                 remainingPosSum += solver.board.cells[r][c];
 
-    // Expanze pocatecnich stavu
+    // Expanze pocatecnich stavu – zvysujeme hloubku, dokud nemame dost work items
     int totalCells = rows * cols;
     int expandDepth = std::clamp(totalCells / 4, 2, 32);
+    int minWorkItems = numProcs * 16; // chceme alespon 16x vice work items nez procesu
 
     SearchState initState;
     initState.cellState.assign(rows, std::vector<int>(cols, 0));
 
     std::vector<WorkItem> workQueue;
-    dfs(solver, initState, 0, 0, remainingPosSum, 0, &workQueue, expandDepth);
+    while (expandDepth <= totalCells) {
+        workQueue.clear();
+        solver.bestScore = INT_MIN; // reset pro novou expanzi
+        SearchState tmpState = initState;
+        dfs(solver, tmpState, 0, 0, remainingPosSum, 0, &workQueue, expandDepth);
+        if ((int)workQueue.size() >= minWorkItems) break;
+        expandDepth += std::max(1, (totalCells - expandDepth) / 2);
+    }
 
     // Seradime work items podle potencialu (nejlepsi prvni) pro lepsi orezavani
     std::sort(workQueue.begin(), workQueue.end(), [](const WorkItem& a, const WorkItem& b) {
@@ -461,7 +470,7 @@ int solveMaster(Solver& solver, int numProcs) {
 
     int numSlaves = numProcs - 1;
     int nextWork = 0;
-    int activeSlaves = 0;
+    int activeSlaves = 0; // sleduj kolik maka
 
     // Pocatecni rozeslani prace
     for (int slave = 1; slave <= numSlaves && nextWork < (int)workQueue.size(); slave++, nextWork++) {
@@ -472,18 +481,18 @@ int solveMaster(Solver& solver, int numProcs) {
         activeSlaves++;
     }
 
-    // Ukonceni slave procesu, ktere nedostaly zadnou praci
-    for (int slave = activeSlaves + 1; slave <= numSlaves; slave++) {
-        int dummy = 0;
-        MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
-    }
+    // // !!! Propustit slave, ktere nedostal zadnou praci - jinak by cekali na praci, ktera neprijde a nedoslo by k ukonceni
+    // for (int slave = activeSlaves + 1; slave <= numSlaves; slave++) {
+    //     int dummy = 0;
+    //     MPI_Send(&dummy, 1, MPI_INT, slave, TAG_TERMINATE, MPI_COMM_WORLD);
+    // }
 
-    // Prijimani vysledku a rozesılani dalsi prace
+    // Prijimani vysledku a rozesilani dalsi prace
     while (activeSlaves > 0) {
         MPI_Status status;
         int resSz;
         MPI_Recv(&resSz, 1, MPI_INT, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
-        int slave = status.MPI_SOURCE;
+        int slave = status.MPI_SOURCE; // kdo skoncil?
 
         std::vector<char> resBuf(resSz);
         MPI_Recv(resBuf.data(), resSz, MPI_BYTE, slave, TAG_RESULT, MPI_COMM_WORLD, &status);
@@ -499,13 +508,13 @@ int solveMaster(Solver& solver, int numProcs) {
             solver.bestPlacedPieces = slavePieces;
         }
 
-        // Preskoc work items, ktere uz nemohou zlepsit nejlepsi reseni
+        // !!! Preskoc work items, ktere uz nemohou zlepsit nejlepsi reseni
         while (nextWork < (int)workQueue.size() &&
                workQueue[nextWork].currentScore + workQueue[nextWork].remainingPosSum <= solver.bestScore) {
             nextWork++;
         }
 
-        // Poslat dalsi praci nebo ukoncit
+        // Poslat dalsi praci nebo propustit
         if (nextWork < (int)workQueue.size()) {
             auto buf = serializeWorkItem(workQueue[nextWork], rows, cols, solver.bestScore);
             int sz = (int)buf.size();
@@ -641,7 +650,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::vector<Piece> allPlacements = generateAllPlacements(board, getAllShapes());
+    std::vector<Piece> allPlacements = generateAllPlacements(board, getAllShapes()); // TODO: Mohl by se delat jen v masteru a posilat slaveum jen relevantni cast?
     Solver solver;
     initSolver(solver, board, allPlacements);
 
